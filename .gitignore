@@ -1,0 +1,23 @@
+# Dependências
+node_modules
+npm-debug.log*
+
+# Dados gerados (registros de verificação) — NÃO versionar (podem conter conteúdo sensível)
+data/
+*.log
+
+# Segredos — NUNCA subir
+.env
+.env.*
+!.env.example
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Builds
+build/
+dist/
+coverage/
