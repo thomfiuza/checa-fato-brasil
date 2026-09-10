@@ -1,0 +1,25 @@
+{
+  "name": "checa-fato-brasil",
+  "version": "0.3.0",
+  "description": "Plataforma pública e gratuita de verificação de fatos políticos e transparência pública no Brasil. Sem viés: só fatos e fontes oficiais.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "fact-checking",
+    "checagem-de-fatos",
+    "civictech",
+    "govtech",
+    "transparencia",
+    "brasil",
+    "fake-news"
+  ],
+  "author": "Thomaz Fiuza de Sousa Cruz",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "optionalDependencies": {}
+}
