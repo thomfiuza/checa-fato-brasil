@@ -32,7 +32,7 @@ const ADMIN_PASS = process.env.ADMIN_PASS || 'checafato';
 const JWT_SECRET = process.env.JWT_SECRET || 'checa-fato-demo-secret-altere-producao';
 const TOKEN_TTL_MS = Number(process.env.TOKEN_TTL_MS || (12*3600*1000)); // 12h
 const MUTATE = 'MUTATE'; // permissão de escrita no painel
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CHECKS_FILE = path.join(DATA_DIR, 'checks.json');
 const REVALID_MS = Number(process.env.REVALID_MS || (15*60*1000)); // revalidação periódica (15 min)
 // Opcional: chave de API do Google Fact Check Tools (ClaimReview search API).

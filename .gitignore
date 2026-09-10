@@ -10,6 +10,7 @@ data/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Sistema / editor
 .DS_Store
