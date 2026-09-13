@@ -7,7 +7,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV HOST=0.0.0.0
-# sem dependências externas: basta copiar o código
+# instala dependências (pg) antes de copiar o resto (cache de camadas)
+COPY package*.json ./
+RUN npm install --omit=dev
 COPY . .
 EXPOSE 8080
 # garante que o diretório de dados exista e seja persistível via volume

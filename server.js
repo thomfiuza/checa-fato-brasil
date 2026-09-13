@@ -84,12 +84,25 @@ function ensureData() {
       fs.writeFileSync(CHECKS_FILE, JSON.stringify(seedChecks(), null, 2));
     }
   } else {
-    // cria a tabela se não existir (schema mínimo)
+    // cria a tabela se não existir (schema mínimo) e aplica o seed se vier vazia
     pool.query(`CREATE TABLE IF NOT EXISTS checks (
       id TEXT PRIMARY KEY,
       payload JSONB NOT NULL,
       created_at TIMESTAMPTZ DEFAULT now()
-    )`).catch(e => console.error('PG init:', e.message));
+    )`)
+      .then(() => pool.query('SELECT count(*)::int AS n FROM checks'))
+      .then(r => {
+        if (r.rows[0].n === 0) {
+          console.log('PG: tabela vazia — aplicando seed de exemplo');
+          return Promise.all(seedChecks().map(c =>
+            pool.query(
+              'INSERT INTO checks(id, payload, created_at) VALUES($1,$2,now()) ON CONFLICT (id) DO NOTHING',
+              [c.id, JSON.stringify(c)]
+            )
+          ));
+        }
+      })
+      .catch(e => console.error('PG init:', e.message));
   }
 }
 async function loadChecks() {
