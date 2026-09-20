@@ -753,7 +753,11 @@ function renderCheckPage(c) {
     + '<meta property="og:url" content="' + pageUrl + '">'
     + '<meta property="og:title" content="' + escH(claim) + ' — ' + m.txt + '">'
     + '<meta property="og:description" content="' + escH(desc) + '">'
+    + '<meta property="og:image" content="' + SITE_ORIGIN + '/og-brand.png">'
+    + '<meta property="og:image:width" content="1200">'
+    + '<meta property="og:image:height" content="630">'
     + '<meta name="twitter:card" content="summary">'
+    + '<meta name="twitter:image" content="' + SITE_ORIGIN + '/og-brand.png">'
     + '<meta name="twitter:title" content="' + escH(claim) + ' — ' + m.txt + '">'
     + '<meta name="twitter:description" content="' + escH(desc) + '">'
     + '<script type="application/ld+json">' + JSON.stringify(jsonld).replace(/</g, '\\u003c') + '</script>'
@@ -1067,6 +1071,8 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/' || url.pathname === '/index.html') return sendHTML(res, 'index.html');
   if (url.pathname === '/app.js') { res.writeHead(200, Object.assign({'Content-Type':'application/javascript; charset=utf-8', 'Cache-Control':'max-age=300'}, SEC_HEADERS)); return fs.createReadStream(path.join(PUBLIC_DIR,'app.js')).pipe(res); }
   if (url.pathname === '/styles.css') { res.writeHead(200, Object.assign({'Content-Type':'text/css; charset=utf-8', 'Cache-Control':'max-age=300'}, SEC_HEADERS)); return fs.createReadStream(path.join(PUBLIC_DIR,'styles.css')).pipe(res); }
+  if (url.pathname === '/og-brand.png') { res.writeHead(200, Object.assign({'Content-Type':'image/png', 'Cache-Control':'public, max-age=86400'}, SEC_HEADERS)); return fs.createReadStream(path.join(PUBLIC_DIR,'og-brand.png')).pipe(res); }
+  if (url.pathname === '/favicon.svg') { res.writeHead(200, Object.assign({'Content-Type':'image/svg+xml', 'Cache-Control':'public, max-age=86400'}, SEC_HEADERS)); return fs.createReadStream(path.join(PUBLIC_DIR,'favicon.svg')).pipe(res); }
   if (url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
 
   return json(res, 404, { error:'Rota não encontrada' });
