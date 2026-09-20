@@ -919,7 +919,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return json(res, 200, {});
 
   // ---- API ----
-  if (url.pathname === '/api/health') return json(res, 200, { ok:true, gcc: !!GCC_API_KEY, time:new Date().toISOString() });
+  if (url.pathname === '/api/health') {
+    let pgok = null;
+    if (USE_PG) { try { await pool.query('SELECT 1'); pgok = true; } catch { pgok = false; } }
+    return json(res, 200, { ok:true, gcc: !!GCC_API_KEY, pg: USE_PG, pg_connected: pgok, time:new Date().toISOString() });
+  }
 
   if (url.pathname === '/api/auth' && req.method === 'POST') {
     const ip = clientIp(req);
