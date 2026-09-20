@@ -21,6 +21,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { URL } = require('url');
 
 const PORT = process.env.PORT || 8000;
@@ -866,7 +867,54 @@ const SEC_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 };
 
+/* Compressão gzip transparente para respostas de texto (HTML/JS/CSS/JSON/XML/SVG). */
+function enableCompression(req, res) {
+  if (!/gzip/i.test(req.headers['accept-encoding'] || '')) return;
+  const gzip = zlib.createGzip({ level: 6 });
+  const rawWrite = res.write.bind(res);
+  const rawEnd = res.end.bind(res);
+  const rawHead = res.writeHead.bind(res);
+  let compressing = false;
+  gzip.on('data', c => { rawWrite(c); });
+  gzip.on('end', () => { rawEnd(); });
+  const shouldCompress = (headers) => {
+    const ct = String((headers && headers['Content-Type']) || '');
+    return /text\/|application\/(json|javascript|xml|svg\+xml|x-www-form-urlencoded)|\+json|\+xml|\+javascript/i.test(ct);
+  };
+  res.writeHead = function (status, headers) {
+    headers = headers || {};
+    if (!compressing && shouldCompress(headers)) {
+      compressing = true;
+      const h = Object.assign({}, headers);
+      h['Content-Encoding'] = 'gzip';
+      h['Vary'] = 'Accept-Encoding';
+      delete h['Content-Length'];
+      return rawHead(status, h);
+    }
+    return rawHead(status, headers);
+  };
+  res.write = function (chunk, enc, cb) {
+    if (compressing) {
+      if (typeof enc === 'function') cb = enc;
+      gzip.write(chunk, cb || undefined);
+      return true;
+    }
+    return rawWrite(chunk, enc, cb);
+  };
+  res.end = function (chunk, enc, cb) {
+    if (compressing) {
+      if (typeof enc === 'function') cb = enc;
+      if (chunk != null && chunk !== '') gzip.write(chunk);
+      gzip.end();
+      if (cb) res.on('finish', cb);
+      return res;
+    }
+    return rawEnd(chunk, enc, cb);
+  };
+}
+
 const server = http.createServer(async (req, res) => {
+  enableCompression(req, res);
   const url = new URL(req.url, 'http://x');
   if (req.method === 'OPTIONS') return json(res, 200, {});
 
@@ -1029,7 +1077,13 @@ const server = http.createServer(async (req, res) => {
       total_checagens_eleitorais: cats.eleicoes.length,
       fonte_oficial: 'https://www.tse.jus.br',
       dica:'Durante eleições, o app ativa alertas em tempo real sobre boatos.',
-      proximo_turno: proximoTurno()
+      proximo_turno: proximoTurno(),
+      calendario: [
+        { data:'04/10/2026', evento:'1º turno — Eleições Gerais: presidente, governadores, senadores e deputados (8h às 17h, horário de Brasília)' },
+        { data:'25/10/2026', evento:'2º turno (apenas para os cargos que não elegerem a maioria no 1º turno)' },
+        { data:'19/09/2026', evento:'Início do período com regras mais rígidas para prisão de candidatos (apenas em flagrante)' }
+      ],
+      fonte_calendario:'Resolução TSE nº 23.760/2026'
     });
   }
 

@@ -177,6 +177,10 @@ async function carregarEleitoral(){
     $('#eleitoralStats').innerHTML='<div class="stat"><div class="num">'+d.total_checagens_eleitorais+'</div><div class="lab">Checagens eleitorais na base</div></div>'
       +'<div class="stat"><div class="num">'+d.alertas_falsos_eleitorais.length+'</div><div class="lab">Alertas de conteúdo falso</div></div>'
       +'<div class="stat"><div class="num">TSE</div><div class="lab">Fonte oficial'+(d.fonte_oficial?' · <a href="'+d.fonte_oficial+'" target="_blank">consulte</a>':'')+'</div></div>';
+    const calEl=document.getElementById('eleitoralCalendario');
+    if(calEl && d.calendario){
+      calEl.innerHTML = d.calendario.map(x=>'<li><b style="color:var(--azul)">'+esc(x.data)+'</b> — '+esc(x.evento)+'</li>').join('');
+    }
     const al=d.alertas_falsos_eleitorais;
     $('#eleitoralAlertas').innerHTML = al.length? al.map(a=>'<div class="reg"><div class="flexT"><div class="row">'+seloHTML(a.classificacao)+'<span class="tt">'+esc(a.titulo)+'</span></div><span class="pill">'+fmtData(a.verificado_em)+'</span></div></div>').join('') : '<div class="note">Nenhum alerta eleitoral falso no momento.</div>';
   }catch(e){ $('#eleitoralAlertas').innerHTML='<div class="note">Backend indisponível.</div>'; }
