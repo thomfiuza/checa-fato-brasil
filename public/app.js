@@ -34,12 +34,13 @@ function go(v){
 }
 
 /* ---------- verificação ---------- */
+/* Exemplos = títulos da base (match forte → verificação instantânea) — prioridade: eleições 2026 */
 const EXAMPLES = [
   "Governo federal aprova aumento de 30% no salário dos vereadores",
   "Eleições no Brasil voltam a usar voto impresso obrigatório",
-  "A vacina X não protege e fez mal a milhares de pessoas",
-  "Obra municipal superfaturada em 200%, diz auditoria",
-  "Senador prometeu construir mil escolas na rede pública"
+  "Voto nulo derruba o candidato e o cargo fica vago",
+  "Urna eletrônica pode ser manipulada pelo WhatsApp",
+  "Presidente vai privatizar a saúde"
 ];
 function renderChips(){ $('#chips').innerHTML = EXAMPLES.map((e,i)=>'<div class="chip" onclick="setExample('+i+')">Ex '+ (i+1) +'</div>').join(''); }
 function setExample(i){ $('#inp').value=EXAMPLES[i]; $('#url').value=''; }
@@ -53,6 +54,10 @@ async function verificar(){
   try{
     const r = await fetch(API+'/api/verificar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,url})});
     const d = await r.json();
+    if(!r.ok){
+      $('#resultado').innerHTML='<div class="note">⚠️ '+(d.error||('Erro na verificação (HTTP '+r.status+'). Tente novamente em instantes.'))+'</div>';
+      return;
+    }
     renderResultado(d);
     await buscarOficiais(d.category);
   }catch(e){
@@ -89,11 +94,12 @@ function renderHistorico(){
   const el = document.getElementById('historico'); if(!el) return;
   let h=[]; try{ h=JSON.parse(localStorage.getItem('cfb_hist')||'[]'); }catch{ h=[]; }
   if(!h.length){ el.innerHTML='<div class="note" style="background:#eef2f6;border-color:#dfe6ec;color:#5a6b7a">Nenhuma verificação sua ainda. Faça uma verificação acima — ela ficará salva aqui.</div>'; return; }
-  el.innerHTML = h.map(x=>'<div class="reg" style="cursor:default;display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center"><div>'+seloHTML(x.cls)+'</div><div><div class="tt">'+esc(x.t)+'</div><div class="mt">'+fmtData(x.date)+'</div></div><button class="btn seg peq" onclick="removerHistorico('+JSON.stringify(x.t)+')">✕</button></div>').join('');
+  /* Botão por ÍNDICE — nunca embutir strings em atributo (imune a XSS) */
+  el.innerHTML = h.map((x,i)=>'<div class="reg" style="cursor:default;display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center"><div>'+seloHTML(x.cls)+'</div><div><div class="tt">'+esc(x.t)+'</div><div class="mt">'+fmtData(x.date)+'</div></div><button class="btn seg peq" title="Remover do histórico" onclick="removerHistoricoIdx('+i+')">✕</button></div>').join('');
 }
-function removerHistorico(t){
+function removerHistoricoIdx(i){
   let h=[]; try{ h=JSON.parse(localStorage.getItem('cfb_hist')||'[]'); }catch{}
-  h = h.filter(x=>x.t!==t); localStorage.setItem('cfb_hist',JSON.stringify(h)); renderHistorico();
+  h.splice(i,1); localStorage.setItem('cfb_hist',JSON.stringify(h)); renderHistorico();
 }
 
 /* ---------- pesquisa real (Wikipedia + Câmara) ---------- */
@@ -153,9 +159,21 @@ async function carregarIntegridade(){
 }
 
 /* ---------- modo eleitoral ---------- */
+function renderBannerEleicoes(d){
+  const b=document.getElementById('bannerEleicoes');
+  if(!b || !d.proximo_turno) return;
+  const t=d.proximo_turno;
+  const label = t.turno===1 ? '1º turno (4 de outubro)' : '2º turno (25 de outubro)';
+  b.hidden=false;
+  b.innerHTML='<div class="row entre" style="flex-wrap:wrap;gap:10px;align-items:center">'
+    +'<div><b>🗳 Eleições 2026 — faltam <span id="diaCount">'+t.dias+'</span> dia(s) para o '+label+'</b>'
+    +'<div style="font-size:.82rem;opacity:.85;margin-top:2px">Falsos boatos se multiplicam nas semanas de eleição. Antes de compartilhar, <b>checa</b>.</div></div>'
+    +'<button class="btn cta" onclick="go(\'eleitoral\')">Ver alerta eleitoral</button></div>';
+}
 async function carregarEleitoral(){
   try{
     const r=await fetch(API+'/api/eleitoral'); const d=await r.json();
+    renderBannerEleicoes(d);
     $('#eleitoralStats').innerHTML='<div class="stat"><div class="num">'+d.total_checagens_eleitorais+'</div><div class="lab">Checagens eleitorais na base</div></div>'
       +'<div class="stat"><div class="num">'+d.alertas_falsos_eleitorais.length+'</div><div class="lab">Alertas de conteúdo falso</div></div>'
       +'<div class="stat"><div class="num">TSE</div><div class="lab">Fonte oficial'+(d.fonte_oficial?' · <a href="'+d.fonte_oficial+'" target="_blank">consulte</a>':'')+'</div></div>';
@@ -211,8 +229,34 @@ function renderResultado(d){
       +(d.pesquisa.wikipedia ? '<p style="font-size:.9rem">📖 <b>'+esc(d.pesquisa.wikipedia.titulo)+':</b> '+esc(d.pesquisa.wikipedia.resumo.slice(0,420))+'…</p><a class="pill" href="'+d.pesquisa.wikipedia.url+'" target="_blank" rel="noopener">ler na Wikipedia</a>' : '')
       +(d.pesquisa.proposicoes && d.pesquisa.proposicoes.length ? '<div style="margin-top:8px"><b class="muted" style="font-size:.85rem">Proposições na Câmara (dados abertos):</b><ul style="font-size:.85rem;margin-top:4px">'+d.pesquisa.proposicoes.map(p=>'<li><a href="'+p.url+'" target="_blank" rel="noopener">'+esc(p.sigla)+'</a> — '+esc(p.ementa)+'</li>').join('')+'</ul></div>':'')
       +'<p class="fonte">Fontes reais consultadas automaticamente (Wikipedia pt + dados abertos da Câmara).</p></div>':'')
+    +(d.id ? shareHTML(d) : '')
     +'</div>';
   addHistorico(d);
+}
+
+/* ---------- compartilhamento: cada verificação tem página pública ---------- */
+let _ultimaVerificacao = null;
+function shareURL(){ return location.origin + '/c/' + _ultimaVerificacao; }
+function shareText(d){
+  const s = seloMap[d.classification] || seloMap.misto;
+  return '"'+(d.title||'')+'" — '+s.txt+' (índice '+(d.confidence||'-')+'/100). '+(d.summary||'')+' Confira: '+shareURL();
+}
+function shareHTML(d){
+  _ultimaVerificacao = d.id;
+  const t = encodeURIComponent(shareText(d)), u = encodeURIComponent(shareURL());
+  return '<div class="ev" style="margin-top:12px"><h4>Compartilhe este resultado</h4>'
+    +'<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:8px">'
+    +'<a class="btn peq" target="_blank" rel="noopener" href="https://wa.me/?text='+t+'">WhatsApp</a>'
+    +'<a class="btn peq" target="_blank" rel="noopener" href="https://t.me/share/url?url='+u+'&text='+t+'">Telegram</a>'
+    +'<a class="btn peq" target="_blank" rel="noopener" href="https://x.com/intent/tweet?text='+t+'">X / Twitter</a>'
+    +'<button class="btn seg peq" onclick="copiarLink()">📋 Copiar link</button>'
+    +'</div><p class="fonte" style="margin-top:8px">Cada verificação tem uma página pública com selo, fontes e trilha de auditoria — compartilhável no WhatsApp com card de preview.</p></div>';
+}
+function copiarLink(){
+  if(!_ultimaVerificacao) return;
+  const u = shareURL();
+  if(navigator.clipboard){ navigator.clipboard.writeText(u).then(()=>alert('Link copiado! '+u), ()=>alert('Link: '+u)); }
+  else alert('Link: '+u);
 }
 function consensoHTML(c, micros){
   const cor = c.grau==='alto'?'var(--verde)': c.grau==='divergente'||c.grau==='sem-consenso'?'var(--vermelho)':'var(--ambar)';
@@ -226,16 +270,20 @@ function consensoHTML(c, micros){
 function latencia(ms){ return (ms>1000?(ms/1000).toFixed(1)+'s':Math.round(ms)+'ms'); }
 function fmtData(dt){ if(!dt)return ''; try{return new Date(dt).toLocaleDateString('pt-BR');}catch{return dt;} }
 function esc(s){ return (s==null?'':String(s)).replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+function attrEsc(s){ return esc(s).replace(/"/g,'&quot;'); } // seguro para atributos HTML (value="...")
 
 /* ---------- recentes + stats ---------- */
+let _recentes=[]; // espelho seguro — evita embutir ids em atributos onclick
 async function loadRecents(){
   try{
     const r = await fetch(API+'/api/checks?limit=6'); const list = await r.json();
-    $('#recents').innerHTML = list.map(c=>'<div class="reg" onclick="abrirDetalhe('+JSON.stringify(c.id)+')" style="display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;">'
+    _recentes = list;
+    $('#recents').innerHTML = list.map((c,i)=>'<div class="reg" onclick="abrirDetalheIdx('+i+')" style="display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;">'
       +'<div>'+seloHTML(c.classification)+'</div><div><div class="tt">'+esc(c.title)+'</div><div class="mt">'+esc(c.summary||'')+'</div></div>'
       +'<span class="pill">'+esc(c.category)+'</span></div>').join('')||'<div class="note">Sem registros ainda.</div>';
   }catch(e){ $('#recents').innerHTML='<div class="note">Backend indisponível.</div>'; }
 }
+function abrirDetalheIdx(i){ if(_recentes[i]) abrirDetalhe(_recentes[i].id); }
 async function abrirDetalhe(id){
   try{
     const r=await fetch(API+'/api/checks?limit=500'); const list=await r.json();
@@ -334,16 +382,18 @@ async function loadCura(){
   }catch(e){ $('#curaList').innerHTML='<div class="note">Backend indisponível.</div>'; }
 }
 function curaCard(c){
-  return '<div class="res" id="cura-'+c.id+'">'
+  /* id sanitizado para uso em atributos + valores escapados p/ atributo */
+  const cid = String(c.id).replace(/[^a-zA-Z0-9_-]/g,'');
+  return '<div class="res" id="cura-'+cid+'">'
     +'<div class="flexT"><div class="row">'+seloHTML(c.classification)+'<b style="font-size:1rem">'+esc(c.title)+'</b></div>'
-    +'<select onchange="curaStatusSel(\''+c.id+'\',this.value)">'
+    +'<select onchange="curaStatusSel(\''+cid+'\',this.value)">'
     +['pendente','em_analise','verificado'].map(s=>'<option '+(c.status===s?'selected':'')+' value="'+s+'">'+s+'</option>').join('')
     +'</select></div>'
-    +'<div style="margin:10px 0"><label>Resumo (em poucas palavras)</label><input type="text" id="sum-'+c.id+'" value="'+esc(c.summary||'')+'"></div>'
-    +'<div style="margin:8px 0"><label>Explicação / Apuração</label><textarea id="exp-'+c.id+'" style="min-height:70px">'+esc(c.explanation||'')+'</textarea></div>'
-    +'<div style="margin:8px 0"><label>Classificação</label><select id="cls-'+c.id+'">'+Object.keys(seloMap).filter(k=>k!=='misto').map(k=>'<option '+(c.classification===k?'selected':'')+' value="'+k+'">'+seloMap[k].txt+'</option>').join('')+'</select></div>'
-    +'<div class="flexT"><span class="fonte">ID '+c.id+' · '+(c.verified_at?fmtData(c.verified_at):'')+'</span>'
-    +'<button class="btn peq" onclick="salvarCura(\''+c.id+'\')">💾 Salvar</button></div></div>';
+    +'<div style="margin:10px 0"><label>Resumo (em poucas palavras)</label><input type="text" id="sum-'+cid+'" value="'+attrEsc(c.summary||'')+'"></div>'
+    +'<div style="margin:8px 0"><label>Explicação / Apuração</label><textarea id="exp-'+cid+'" style="min-height:70px">'+esc(c.explanation||'')+'</textarea></div>'
+    +'<div style="margin:8px 0"><label>Classificação</label><select id="cls-'+cid+'">'+Object.keys(seloMap).filter(k=>k!=='misto').map(k=>'<option '+(c.classification===k?'selected':'')+' value="'+k+'">'+seloMap[k].txt+'</option>').join('')+'</select></div>'
+    +'<div class="flexT"><span class="fonte">ID '+esc(c.id)+' · '+(c.verified_at?fmtData(c.verified_at):'')+'</span>'
+    +'<button class="btn peq" onclick="salvarCura(\''+cid+'\')">💾 Salvar</button></div></div>';
 }
 async function curaStatusSel(id,val){ await fetch(API+'/api/checks/'+id,{method:'PATCH',headers:authHeaders(),body:JSON.stringify({status:val})}); }
 async function salvarCura(id){
@@ -357,7 +407,8 @@ async function salvarCura(id){
 window.addEventListener('DOMContentLoaded',()=>{
   renderChips(); renderFiltros(); renderEntidades(); renderFaq(); renderCuraFiltro();
   loadRecents(); refreshStats(); renderHistorico(); loadPoliticosReais();
-  $('#inp').addEventListener('keydown',e=>{ if(e.key==='Enter') verificar(); });
+  carregarEleitoral(); // popula o banner de countdown das eleições (home)
+  $('#inp').addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)) verificar(); });
   $('#url').addEventListener('keydown',e=>{ if(e.key==='Enter') verificar(); });
   $('#pesqTermo').addEventListener('keydown',e=>{ if(e.key==='Enter') pesquisarReal(); });
   $('#cnpjInp').addEventListener('keydown',e=>{ if(e.key==='Enter') consultarCNPJ(); });
@@ -369,4 +420,4 @@ window.go=go;window.toggleMenu=toggleMenu;window.setExample=setExample;window.ve
 window.abrirDetalhe=abrirDetalhe;window.setNivel=setNivel;window.setPoder=setPoder;window.abrirEnte=abrirEnte;
 window.buscarPergunta=buscarPergunta;window.setCuraFiltro=setCuraFiltro;window.curaStatusSel=curaStatusSel;window.salvarCura=salvarCura;
 window.fazerLogin=fazerLogin;window.sairLogin=sairLogin;
-window.pesquisarReal=pesquisarReal;window.consultarCNPJ=consultarCNPJ;window.removerHistorico=removerHistorico;window.carregarIntegridade=carregarIntegridade;
+window.pesquisarReal=pesquisarReal;window.consultarCNPJ=consultarCNPJ;window.removerHistoricoIdx=removerHistoricoIdx;window.abrirDetalheIdx=abrirDetalheIdx;window.copiarLink=copiarLink;window.carregarIntegridade=carregarIntegridade;

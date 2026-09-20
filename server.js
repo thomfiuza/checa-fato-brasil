@@ -38,6 +38,23 @@ const REVALID_MS = Number(process.env.REVALID_MS || (15*60*1000)); // revalidaç
 // Opcional: chave de API do Google Fact Check Tools (ClaimReview search API).
 const GCC_API_KEY = process.env.GCC_API_KEY || '';
 
+/* Calendário eleitoral 2026 (Resolução TSE nº 23.760/2026) */
+const ELEICOES_2026 = {
+  primeiro_turno: '2026-10-04T08:00:00-03:00',
+  segundo_turno: '2026-10-25T08:00:00-03:00'
+};
+function diasPara(iso){
+  const diff = new Date(iso).getTime() - Date.now();
+  return Math.max(0, Math.ceil(diff / 86400000));
+}
+function proximoTurno(){
+  const p1 = new Date(ELEICOES_2026.primeiro_turno);
+  const agora = new Date();
+  if (agora < p1) return { turno: 1, data: '2026-10-04', dias: diasPara(ELEICOES_2026.primeiro_turno), segundo_turno: '2026-10-25' };
+  return { turno: 2, data: '2026-10-25', dias: diasPara(ELEICOES_2026.segundo_turno), segundo_turno: null };
+}
+const SITE_ORIGIN = process.env.SITE_ORIGIN || 'https://checa-fato-brasil.onrender.com';
+
 /* ------------------------------------------------------------------ */
 /*  Autenticação persistente (token assinado HMAC)                     */
 /*  Permite que a sessão sobreviva a reinício do servidor.             */
@@ -182,11 +199,24 @@ function scoreLinguagem(text) {
 /* ------------------------------------------------------------------ */
 /*  Extração de conteúdo de uma URL (título + meta + texto bruto)      */
 /* ------------------------------------------------------------------ */
+/* Bloqueia alvos de rede interna (anti-SSRF): loopback, RFC1918, link-local,
+   IPv6 privado e o endpoint de metadata da nuvem (169.254.169.254). */
+function isPrivateHost(hostname) {
+  const h = String(hostname||'').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.localhost')) return true;
+  if (h === '0.0.0.0' || h === '::' || h === '::1') return true;
+  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^169\.254\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)) return true;
+  if (/^f[cd][0-9a-f]{2}:/i.test(h) || /^fe[89ab][0-9a-f]:/i.test(h)) return true;
+  return false;
+}
 function fetchURL(target, redirectLeft = 4) {
   return new Promise((resolve, reject) => {
     let url;
     try { url = new URL(target); if (!/^https?:$/.test(url.protocol)) throw new Error('proto'); }
     catch { return reject(new Error('URL inválida')); }
+    if (isPrivateHost(url.hostname)) return reject(new Error('URL bloqueada: redes internas não são permitidas.'));
     const lib = url.protocol === 'https:' ? https : http;
     const req = lib.get(url, { headers: { 'User-Agent': 'ChecaFatoBrasil/1.0 (+public verification bot)', 'Accept-Language':'pt-BR,pt;q=0.9' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectLeft > 0) {
@@ -300,7 +330,7 @@ function matchLocal(query, checks) {
 /* ------------------------------------------------------------------ */
 /*  Motor principal de verificação                                     */
 /* ------------------------------------------------------------------ */
-function classify(scores, lang, external) {
+function classify(_scores, lang, external) {
   // Combina: linguagem manipulativa (0-100) + presença de fontes oficiais
   const manip = lang.manipulativeScore;
   const oficiais = lang.indicators.oficialDomains;
@@ -338,9 +368,9 @@ async function verify(input) {
   const lang = scoreLinguagem(haystack);
 
   // busca externa (se configurada) + local
-  const external = input.url || text ? await searchFactCheckAPI((text || fetched.title || '').slice(0, 120)) : { used: false, results: [] };
+  const external = input.url || text ? await searchFactCheckAPI((text || (fetched && fetched.title) || '').slice(0, 120)) : { used: false, results: [] };
   const local = matchLocal(haystack, checks);
-  const res = classify(statusFrom(local), lang, external);
+  const res = classify(null, lang, external);
 
   // prioriza local se a correspondência for forte
   let classification = res.classification, confidence = res.confidence, sources = [], explanation = '', summary = '';
@@ -406,7 +436,6 @@ async function verify(input) {
   return record;
 }
 
-function statusFrom(local) { return local; }
 function buildExplanation(lang, fetched, external) {
   const bits = [];
   if (lang.manipulativeScore >= 40) bits.push('O texto apresenta forte apelo emocional e linguagem sensacionalista, típicos de conteúdo enganoso.');
@@ -602,39 +631,57 @@ function inferCategory(t) {
    puxada errada, informação desatualizada), o registro volta a ser
    sinalizado como "revisar" para a curadoria humana (micro -> macro).
    ------------------------------------------------------------------ */
+let revalidando = false;
 let statsRevalidacao = { ultima: null, revisados: 0, revalidados: 0, erros: 0 };
 async function revalidarLote() {
-  const checks = await loadChecks();
-  let revisados = 0, revalidados = 0;
-  for (let i = 0; i < checks.length; i++) {
-    const c = checks[i];
-    if (!c || c.status !== 'verificado') continue;
-    // re-análise heurística do conteúdo armazenado
-    const lang = scoreLinguagem((c.content || c.title || '').slice(0, 2000));
-    let pesquisa = null;
-    try {
-      const tema = (c.title || '').split(/[;,.]/)[0];
-      pesquisa = await pesquisaAmpla(tema.slice(0, 90) || 'outro');
-    } catch (e) { pesquisa = null; }
-    const local = { score: 0 }; // no re-check não força match local
-    const sinais = coletarMicroSinais((c.content || c.title || ''), lang, null, { used:c.factcheck_used, results:[] }, local, pesquisa);
-    const consenso = nivelConsenso(sinais);
-    revalidados++;
-    c.consenso = { grau: consenso.grau, apoiam: consenso.apoiam, contra: consenso.contra, total: consenso.total, requer_revisao: consenso.requer_revisao };
-    c.microfontes = sinais.filter(s => s.apoio !== null).map(s => ({ fonte: s.fonte, apoio: s.apoio }));
-    c.ultima_revalidacao = new Date().toISOString();
-    // se o consenso ficou fraco/divergente, marca para revisão humana
-    if (consenso.requer_revisao || consenso.grau === 'divergente' || consenso.grau === 'sem-consenso') {
-      c.revisar = true;
-      c.motivo_revisao = 'Consenso multi-fonte insuficiente na revalidação.';
-      revisados++;
-    } else {
-      c.revisar = false;
+  if (revalidando) return { ...statsRevalidacao, ocupado: true }; // evita execuções concorrentes
+  revalidando = true;
+  try {
+    const checks = await loadChecks();
+    let revisados = 0, revalidados = 0;
+    const atualizados = []; // registros com campos de revalidação recalculados
+    for (const c of checks) {
+      if (!c || c.status !== 'verificado') continue;
+      // re-análise heurística do conteúdo armazenado
+      const lang = scoreLinguagem((c.content || c.title || '').slice(0, 2000));
+      let pesquisa = null;
+      try {
+        const tema = (c.title || '').split(/[;,.]/)[0];
+        pesquisa = await pesquisaAmpla(tema.slice(0, 90) || 'outro');
+      } catch (e) { pesquisa = null; }
+      const local = { score: 0 }; // no re-check não força match local
+      const sinais = coletarMicroSinais((c.content || c.title || ''), lang, null, { used:c.factcheck_used, results:[] }, local, pesquisa);
+      const consenso = nivelConsenso(sinais);
+      revalidados++;
+      const campos = {
+        consenso: { grau: consenso.grau, apoiam: consenso.apoiam, contra: consenso.contra, total: consenso.total, requer_revisao: consenso.requer_revisao },
+        microfontes: sinais.filter(s => s.apoio !== null).map(s => ({ fonte: s.fonte, apoio: s.apoio })),
+        ultima_revalidacao: new Date().toISOString(),
+        revisar: !!(consenso.requer_revisao || consenso.grau === 'divergente' || consenso.grau === 'sem-consenso')
+      };
+      if (campos.revisar) { campos.motivo_revisao = 'Consenso multi-fonte insuficiente na revalidação.'; revisados++; }
+      atualizados.push({ id: c.id, campos });
     }
+    if (revalidados) {
+      if (USE_PG) {
+        // upsert por id — não afeta outros registros
+        await saveChecks(atualizados.map(a => { const c = checks.find(x => x.id === a.id); return Object.assign({}, c, a.campos); }));
+      } else {
+        // merge por id sobre o estado ATUAL — nunca sobrescreve registros novos
+        const current = await loadChecks();
+        const byId = new Map(current.map(x => [x.id, x]));
+        for (const a of atualizados) {
+          const existente = byId.get(a.id);
+          if (existente) byId.set(a.id, Object.assign(existente, a.campos));
+        }
+        await saveChecks(Array.from(byId.values()));
+      }
+    }
+    statsRevalidacao = { ultima: new Date().toISOString(), revisados, revalidados, erros: 0 };
+    return statsRevalidacao;
+  } finally {
+    revalidando = false;
   }
-  if (revalidados) await saveChecks(checks);
-  statsRevalidacao = { ultima: new Date().toISOString(), revisados, revalidados, erros: 0 };
-  return statsRevalidacao;
 }
 
 /* ------------------------------------------------------------------ */
@@ -644,36 +691,176 @@ function seedChecks() {
   return [
     { id:'n1', title:'Governo federal aprova aumento de 30% no salário dos vereadores', classification:'enganoso', summary:'O projeto existe, mas o percentual e o alcance foram distorcidos.', explanation:'A proposta que circula trata de reajuste a servidores de determinadas Câmaras, não de todos os vereadores do país, e o percentual não corresponde a 30% em caráter nacional.', sources:['Câmara dos Deputados — Projeto de Lei','Constituição Federal, Art. 29'], category:'eleicoes', verified_at:'2026-08-10', politician_mentioned:'Vereadores', status:'verificado', confidence:78 },
     { id:'n2', title:'Eleições no Brasil voltam a usar voto impresso obrigatório', classification:'falso', summary:'O voto impresso não voltou a ser obrigatório no país.', explanation:'Não há norma em vigor determinando voto impresso no Brasil. O sistema eletrônico segue em uso.', sources:['TSE — nota oficial','Constituição Federal, Art. 14'], category:'eleicoes', verified_at:'2026-08-18', politician_mentioned:'TSE', status:'verificado', confidence:90 },
-    { id:'n3', title:'Vacina X não protege e fez mal a milhares de pessoas', classification:'enganoso', summary:'Mistura fato e exagero sem evidência.', explanation:'Há relatos isolados de eventos adversos, mas não há evidência de dano em "milhares".', sources:['Ministério da Saúde','ANVISA'], category:'saude', verified_at:'2026-08-15', politician_mentioned:null, status:'verificado', confidence:74 },
-    { id:'n4', title:'Obra municipal superfaturada em 200%', classification:'impreciso', summary:'O número foi distorcido; o excedente real é menor e há processo em análise.', explanation:'O dado de "200%" não é o apurado. Há um desvio apontado por órgão de controle, em percentual menor.', sources:['Tribunal de Contas do Estado','Portal da Transparência municipal'], category:'corrupcao', verified_at:'2026-08-12', politician_mentioned:'Prefeitura', status:'em_analise', confidence:66 },
-    { id:'n5', title:'Presidente vai privatizar a saúde', classification:'inverificavel', summary:'Não há evidência suficiente para confirmar ou negar.', explanation:'Não existe documento oficial, projeto de lei ou pronunciamento que sustente essa afirmação.', sources:['Nenhuma fonte oficial encontrada'], category:'saude', verified_at:'2026-08-20', politician_mentioned:null, status:'pendente', confidence:30 },
-    { id:'n6', title:'Deputado prometeu construir mil escolas', classification:'verdadeiro', summary:'Declaração confirmada por registro oficial.', explanation:'O pronunciamento é real e consta de registro parlamentar.', sources:['Câmara dos Deputados — registro'], category:'educacao', verified_at:'2026-08-19', politician_mentioned:'Deputado', status:'verificado', confidence:85 },
-    { id:'n7', title:'Chargem satírica sobre novo imposto', classification:'satira', summary:'Conteúdo de humor, não notícia.', explanation:'A imagem é uma charge satírica. Não deve ser tratada como reportagem factual.', sources:['Veículo de origem — seção de humor'], category:'outro', verified_at:'2026-08-17', politician_mentioned:null, status:'verificado', confidence:80 }
+    { id:'n3', title:'Voto nulo derruba o candidato e o cargo fica vago', classification:'falso', summary:'Boato recorrente desmentido pelo TSE: o voto nulo não provoca reeleição/renovação.', explanation:'O percentual de votos nulos não gera efeito jurídico sobre a eleição: não há regra que "derrube" candidato ou deixe cargo vago em razão de votos nulos. A votação segue a normalidade do pleito.', sources:['TSE — notas sobre boatos eleitorais','Código Eleitoral, Art. 221'], category:'eleicoes', verified_at:'2026-09-01', politician_mentioned:'TSE', status:'verificado', confidence:92 },
+    { id:'n4', title:'Urna eletrônica pode ser manipulada pelo WhatsApp', classification:'falso', summary:'A urna não possui qualquer conectividade para comunicação por aplicativos de mensagem.', explanation:'As urnas eletrônicas não têm acesso à internet nem a redes de celular durante a votação; não existe canal pelo qual uma mensagem pudesse alterar o voto. A totalização é auditável por hash (QR Code) e acompanha a cadeia de custódia do TSE.', sources:['TSE — manual do eleitor e notas técnicas','Resolução TSE sobre auditoria de urnas'], category:'eleicoes', verified_at:'2026-09-02', politician_mentioned:'TSE', status:'verificado', confidence:90 },
+    { id:'n5', title:'Vacina X não protege e fez mal a milhares de pessoas', classification:'enganoso', summary:'Mistura fato e exagero sem evidência.', explanation:'Há relatos isolados de eventos adversos, mas não há evidência de dano em "milhares".', sources:['Ministério da Saúde','ANVISA'], category:'saude', verified_at:'2026-08-15', politician_mentioned:null, status:'verificado', confidence:74 },
+    { id:'n6', title:'Obra municipal superfaturada em 200%', classification:'impreciso', summary:'O número foi distorcido; o excedente real é menor e há processo em análise.', explanation:'O dado de "200%" não é o apurado. Há um desvio apontado por órgão de controle, em percentual menor.', sources:['Tribunal de Contas do Estado','Portal da Transparência municipal'], category:'corrupcao', verified_at:'2026-08-12', politician_mentioned:'Prefeitura', status:'em_analise', confidence:66 },
+    { id:'n7', title:'Presidente vai privatizar a saúde', classification:'inverificavel', summary:'Não há evidência suficiente para confirmar ou negar.', explanation:'Não existe documento oficial, projeto de lei ou pronunciamento que sustente essa afirmação.', sources:['Nenhuma fonte oficial encontrada'], category:'saude', verified_at:'2026-08-20', politician_mentioned:null, status:'pendente', confidence:30 },
+    { id:'n8', title:'Deputado prometeu construir mil escolas', classification:'verdadeiro', summary:'Declaração confirmada por registro oficial.', explanation:'O pronunciamento é real e consta de registro parlamentar.', sources:['Câmara dos Deputados — registro'], category:'educacao', verified_at:'2026-08-19', politician_mentioned:'Deputado', status:'verificado', confidence:85 },
+    { id:'n9', title:'Chargem satírica sobre novo imposto', classification:'satira', summary:'Conteúdo de humor, não notícia.', explanation:'A imagem é uma charge satírica. Não deve ser tratada como reportagem factual.', sources:['Veículo de origem — seção de humor'], category:'outro', verified_at:'2026-08-17', politician_mentioned:null, status:'verificado', confidence:80 }
   ];
 }
 
 /* ------------------------------------------------------------------ */
 /*  Servidor HTTP (frontend + API)                                     */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+   Página pública de verificação (/c/:id)
+   - Card de preview para WhatsApp/Facebook/LinkedIn (tags OG)
+   - Dados estruturados ClaimReview (schema.org) — padrão global de
+     fact-checking (Google Fact Check Markup), usado por agências IFCN
+   ------------------------------------------------------------------ */
+const SELO_META = {
+  verdadeiro:   { txt:'✓ Verdadeiro',   cor:'#22c55e' },
+  falso:        { txt:'✕ Falso',        cor:'#ef4444' },
+  enganoso:     { txt:'⚠ Enganoso',     cor:'#f59e0b' },
+  impreciso:    { txt:'± Impreciso',    cor:'#a78bfa' },
+  inverificavel:{ txt:'? Inverificável',cor:'#94a3b8' },
+  satira:       { txt:'☺ Sátira',       cor:'#60a5fa' }
+};
+const CLAIM_SCORE = { verdadeiro:5, satira:3, impreciso:3, enganoso:2, inverificavel:1, falso:0 };
+function escH(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function renderCheckPage(c) {
+  const m = SELO_META[c.classification] || SELO_META.inverificavel;
+  const claim = c.title || 'Verificação';
+  const desc = (c.summary || c.explanation || '').slice(0, 190);
+  const pageUrl = SITE_ORIGIN + '/c/' + c.id;
+  const conf = (typeof c.confidence === 'number') ? c.confidence : 50;
+  const shareText = '"' + claim + '" — ' + m.txt + ' (índice ' + conf + '/100). ' + desc + ' Confira: ' + pageUrl;
+  const wa = 'https://wa.me/?text=' + encodeURIComponent(shareText);
+  const tg = 'https://t.me/share/url?url=' + encodeURIComponent(pageUrl) + '&text=' + encodeURIComponent(shareText);
+  const xs = 'https://x.com/intent/tweet?text=' + encodeURIComponent(shareText);
+  const sources = (c.sources || []).map(s => '<li>' + escH(s) + '</li>').join('') || '<li>Nenhuma fonte confirmada para este caso.</li>';
+  const jsonld = {
+    '@context': 'https://schema.org',
+    '@type': 'ClaimReview',
+    'itemReviewed': { '@type': 'CreativeWork', 'name': claim, 'text': (c.content || '').slice(0, 1000) },
+    'author': { '@type': 'Organization', 'name': 'Checa Fato Brasil', 'url': SITE_ORIGIN },
+    'datePublished': c.verified_at || new Date().toISOString(),
+    'reviewRating': { '@type': 'Rating', 'ratingValue': (CLAIM_SCORE[c.classification] != null ? CLAIM_SCORE[c.classification] : 1), 'bestRating': 5, 'worstRating': 0 }
+  };
+  const consenso = c.consenso ? ('<div class="box"><h3>Consenso multi-fonte (micro → macro)</h3>'
+    + '<p>' + c.consenso.apoiam + ' fonte(s) a favor · ' + c.consenso.contra + ' contra · de ' + c.consenso.total + ' micro-fonte(s) independentes. Grau: <b>' + escH(c.consenso.grau) + '</b>.</p></div>') : '';
+  return '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+    + '<title>' + escH(claim) + ' — ' + m.txt + ' | Checa Fato Brasil</title>'
+    + '<meta name="description" content="' + escH(desc) + '">'
+    + '<link rel="canonical" href="' + pageUrl + '">'
+    + '<meta property="og:type" content="website">'
+    + '<meta property="og:site_name" content="Checa Fato Brasil">'
+    + '<meta property="og:locale" content="pt_BR">'
+    + '<meta property="og:url" content="' + pageUrl + '">'
+    + '<meta property="og:title" content="' + escH(claim) + ' — ' + m.txt + '">'
+    + '<meta property="og:description" content="' + escH(desc) + '">'
+    + '<meta name="twitter:card" content="summary">'
+    + '<meta name="twitter:title" content="' + escH(claim) + ' — ' + m.txt + '">'
+    + '<meta name="twitter:description" content="' + escH(desc) + '">'
+    + '<script type="application/ld+json">' + JSON.stringify(jsonld).replace(/</g, '\\u003c') + '</script>'
+    + '<style>'
+    + 'body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:#0a141f;color:#eef4f8;line-height:1.55}'
+    + '.bar{height:6px;background:linear-gradient(90deg,#009c3b,#ffdf00)}'
+    + '.wrap{max-width:760px;margin:0 auto;padding:24px 20px 48px}'
+    + '.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;flex-wrap:wrap;gap:8px}'
+    + '.logo{font-weight:800;font-size:1.15rem;letter-spacing:.3px}'
+    + '.logo span{color:#2fd8c4}'
+    + '.pill{display:inline-block;padding:4px 12px;border-radius:999px;border:1px solid #2a3b4d;font-size:.78rem;color:#9fb3c2}'
+    + '.selo{display:inline-block;padding:10px 22px;border-radius:999px;font-size:1.35rem;font-weight:800;color:' + m.cor + ';background:' + m.cor + '22;border:2px solid ' + m.cor + ';margin:6px 0 14px}'
+    + 'h1{font-size:1.55rem;line-height:1.3;margin:10px 0 6px}'
+    + '.claim{background:#101c2a;border:1px solid #1e3042;border-left:4px solid ' + m.cor + ';border-radius:10px;padding:14px 16px;color:#c2d2de;font-size:.98rem;margin:14px 0}'
+    + '.box{background:#101c2a;border:1px solid #1e3042;border-radius:12px;padding:16px 18px;margin:14px 0}'
+    + '.box h3{margin:0 0 8px;font-size:.82rem;letter-spacing:1.5px;text-transform:uppercase;color:#2fd8c4}'
+    + '.box p,.box li{color:#c2d2de;font-size:.95rem;margin:4px 0}'
+    + '.box ul{margin:6px 0 0;padding-left:18px}'
+    + '.meta{color:#5f7d92;font-size:.8rem;margin-top:10px}'
+    + '.meter{height:10px;background:#1e3042;border-radius:999px;overflow:hidden;margin:8px 0 4px}'
+    + '.meter div{height:100%;background:' + m.cor + ';width:' + conf + '%}'
+    + '.share{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}'
+    + '.share a,.share button{padding:10px 16px;border-radius:999px;border:1px solid #2fd8c4;color:#2fd8c4;background:transparent;font-weight:700;font-size:.9rem;cursor:pointer;text-decoration:none}'
+    + '.share .cta{background:#2fd8c4;color:#0a141f;border-color:#2fd8c4}'
+    + 'footer{margin-top:28px;border-top:1px solid #1e3042;padding-top:16px;color:#5f7d92;font-size:.82rem}'
+    + 'footer a{color:#2fd8c4;text-decoration:none}'
+    + '</style></head><body>'
+    + '<div class="bar"></div><div class="wrap">'
+    + '<div class="top"><div class="logo">Checa <span>Fato</span> Brasil</div><span class="pill">Verificação pública · status: ' + escH(c.status || 'pendente') + '</span></div>'
+    + '<div class="selo">' + m.txt + '</div>'
+    + '<h1>' + escH(claim) + '</h1>'
+    + '<div class="claim"><b>Conteúdo analisado:</b> ' + escH((c.content || '').slice(0, 500)) + '</div>'
+    + (c.summary ? '<div class="box"><h3>Em poucas palavras</h3><p>' + escH(c.summary) + '</p></div>' : '')
+    + (c.explanation ? '<div class="box"><h3>A fundo</h3><p>' + escH(c.explanation) + '</p></div>' : '')
+    + '<div class="box"><h3>Fontes usadas</h3><ul>' + sources + '</ul></div>'
+    + '<div class="box"><h3>Índice de confiança</h3><div class="meter"><div></div></div><p><b>' + conf + '%</b></p></div>'
+    + consenso
+    + '<div class="box"><h3>Compartilhe esta verificação</h3><div class="share">'
+    + '<a class="cta" target="_blank" rel="noopener" href="' + wa + '">WhatsApp</a>'
+    + '<a target="_blank" rel="noopener" href="' + tg + '">Telegram</a>'
+    + '<a target="_blank" rel="noopener" href="' + xs + '">X / Twitter</a>'
+    + '<button onclick="navigator.clipboard.writeText(\'' + pageUrl + '\').then(function(){alert(\'Link copiado!\')})">📋 Copiar link</button>'
+    + '</div><p class="meta">Compartilhe com o resultado e a trilha de auditoria — ajude a combater a desinformação.</p></div>'
+    + '<p class="meta">Categoria: ' + escH(c.category || 'outro') + (c.politician_mentioned ? ' · Agente citado: ' + escH(c.politician_mentioned) : '') + ' · Verificado em ' + escH((c.verified_at||'').slice(0,10)) + ' · ID ' + escH(c.id) + (c.ultima_revalidacao ? ' · Última revalidação ' + escH(c.ultima_revalidacao.slice(0,10)) : '') + '</p>'
+    + '<footer><a href="' + SITE_ORIGIN + '">← Fazer minha própria verificação</a><br>'
+    + 'Compromisso de neutralidade: verificamos afirmações e dados, nunca pessoas, partidos ou ideologias. '
+    + 'IA sugere, curadoria humana valida. Dados abertos: <a href="' + SITE_ORIGIN + '/api/public">API pública</a> (CC-BY-SA 4.0).</footer>'
+    + '</div></body></html>';
+}
+
 const PUBLIC_DIR = path.join(__dirname, 'public');
 function sendHTML(res, file) {
   fs.readFile(path.join(PUBLIC_DIR, file), (e, data) => {
-    if (e) { res.writeHead(404); return res.end('404'); }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control':'no-cache' });
+    if (e) { res.writeHead(404, SEC_HEADERS); return res.end('404'); }
+    res.writeHead(200, Object.assign({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control':'no-cache' }, SEC_HEADERS));
     res.end(data);
   });
 }
 function json(res, code, obj) {
-  res.writeHead(code, { 'Content-Type':'application/json; charset=utf-8', 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Headers':'Content-Type' });
+  res.writeHead(code, Object.assign({ 'Content-Type':'application/json; charset=utf-8', 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Headers':'Content-Type' }, SEC_HEADERS));
   res.end(JSON.stringify(obj));
 }
 function readBody(req) {
   return new Promise((resolve) => {
     let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { resolve({}); } });
+    let overflow = false;
+    req.on('data', c => {
+      body += c;
+      if (body.length > 200000) { overflow = true; req.destroy(); }
+    });
+    req.on('end', () => {
+      if (overflow) { resolve({}); return; }
+      try { resolve(JSON.parse(body || '{}')); } catch { resolve({}); }
+    });
   });
 }
+
+/* ------------------------------------------------------------------ */
+/*  Segurança: rate limiting + proteção contra brute force             */
+/* ------------------------------------------------------------------ */
+const buckets = new Map();
+function clientIp(req){ return (req.headers['x-forwarded-for']||'').split(',')[0].trim() || req.socket.remoteAddress || '?'; }
+function rateLimit(key, limit, windowMs) {
+  const now = Date.now();
+  let b = buckets.get(key);
+  if (!b || now - b.start > windowMs) { b = { start: now, n: 0 }; buckets.set(key, b); }
+  b.n++;
+  if (buckets.size > 20000) { for (const [k, v] of buckets) if (now - v.start > v.win) buckets.delete(k); }
+  b.win = windowMs;
+  return b.n <= limit;
+}
+function tooMany(req, route, limit, windowMs) {
+  return !rateLimit(route + ':' + clientIp(req), limit, windowMs);
+}
+/* bloqueio de login: 5 falhas em 10 min -> trava por 15 min */
+const loginFail = new Map();
+function loginLocked(ip){ const f = loginFail.get(ip); return !!f && f.n >= 5 && (Date.now() - f.start) < 10*60*1000; }
+function loginBump(ip){ const f = loginFail.get(ip) || { start: Date.now(), n: 0 }; f.n++; loginFail.set(ip, f); }
+function loginReset(ip){ loginFail.delete(ip); }
+
+/* Cabeçalhos de segurança aplicados a todas as respostas */
+const SEC_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer-when-downgrade',
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+};
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
@@ -683,10 +870,14 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/health') return json(res, 200, { ok:true, gcc: !!GCC_API_KEY, time:new Date().toISOString() });
 
   if (url.pathname === '/api/auth' && req.method === 'POST') {
+    const ip = clientIp(req);
+    if (loginLocked(ip)) return json(res, 429, { error:'Muitas tentativas. Aguarde 15 minutos.' });
     const body = await readBody(req);
     if (body.user === ADMIN_USER && body.pass === ADMIN_PASS) {
+      loginReset(ip);
       return json(res, 200, { token: issueToken(), user: ADMIN_USER });
     }
+    loginBump(ip);
     return json(res, 401, { error:'Credenciais inválidas.' });
   }
   if (url.pathname === '/api/auth' && req.method === 'GET') {
@@ -694,6 +885,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/api/verificar' && req.method === 'POST') {
+    if (tooMany(req, 'verificar', 8, 60*1000)) return json(res, 429, { error:'Muitas requisições. Aguarde um minuto.' });
     const body = await readBody(req);
     if (!body.text && !body.url) return json(res, 400, { error:'Informe texto ou URL.' });
     try {
@@ -733,7 +925,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (upd && req.method === 'DELETE') {
     if(!authed(req)) return json(res, 401, { error:'Autorização necessária.' });
-    const checks = loadChecks().filter(c => c.id !== upd[1]);
+    const checks = (await loadChecks()).filter(c => c.id !== upd[1]);
     await saveChecks(checks);
     return json(res, 200, { ok:true });
   }
@@ -767,6 +959,7 @@ const server = http.createServer(async (req, res) => {
 
   // ---- Pesquisa ampla real (Tira-Dúvidas / contexto) ----
   if (url.pathname === '/api/pesquisa') {
+    if (tooMany(req, 'pesquisa', 10, 60*1000)) return json(res, 429, { error:'Muitas requisições. Aguarde um minuto.' });
     const q = (url.searchParams.get('q')||'').trim();
     if (!q) return json(res, 400, { error:'Informe q' });
     const r = await pesquisaAmpla(q.slice(0, 120));
@@ -775,6 +968,7 @@ const server = http.createServer(async (req, res) => {
 
   // ---- Consulta real de CNPJ (transparência) ----
   if (url.pathname === '/api/cnpj') {
+    if (tooMany(req, 'cnpj', 10, 60*1000)) return json(res, 429, { error:'Muitas requisições. Aguarde um minuto.' });
     const c = (url.searchParams.get('cnpj')||'');
     const r = await cnpjReal(c);
     return json(res, 200, r);
@@ -830,14 +1024,49 @@ const server = http.createServer(async (req, res) => {
       alertas_falsos_eleitorais: alertas,
       total_checagens_eleitorais: cats.eleicoes.length,
       fonte_oficial: 'https://www.tse.jus.br',
-      dica:'Durante eleições, o app ativa alertas em tempo real sobre boatos.'
+      dica:'Durante eleições, o app ativa alertas em tempo real sobre boatos.',
+      proximo_turno: proximoTurno()
     });
+  }
+
+  // ---- Leitura pública de um registro (pela API) ----
+  if (url.pathname.match(/^\/api\/checks\/[^/]+$/) && req.method === 'GET') {
+    const checks = await loadChecks();
+    const c = checks.find(x => x.id === url.pathname.split('/')[3]);
+    if (!c) return json(res, 404, { error:'Não encontrado' });
+    return json(res, 200, c);
+  }
+
+  // ---- Página pública de verificação (link compartilhável) ----
+  if (url.pathname.match(/^\/c\/[^/]+$/) && req.method === 'GET') {
+    const checks = await loadChecks();
+    const c = checks.find(x => x.id === url.pathname.split('/')[2]);
+    if (!c) {
+      res.writeHead(404, Object.assign({ 'Content-Type':'text/html; charset=utf-8' }, SEC_HEADERS));
+      return res.end('<meta charset="utf-8"><title>404</title><body style="font-family:system-ui;background:#0a141f;color:#eef4f8;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1>404</h1><p>Verificação não encontrada.</p><p><a style="color:#2fd8c4" href="/">← Checa Fato Brasil</a></p></div></body>');
+    }
+    res.writeHead(200, Object.assign({ 'Content-Type':'text/html; charset=utf-8', 'Cache-Control':'no-cache' }, SEC_HEADERS));
+    return res.end(renderCheckPage(c));
+  }
+
+  // ---- SEO básico ----
+  if (url.pathname === '/robots.txt') {
+    res.writeHead(200, Object.assign({ 'Content-Type':'text/plain; charset=utf-8' }, SEC_HEADERS));
+    return res.end('User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: ' + SITE_ORIGIN + '/sitemap.xml\n');
+  }
+  if (url.pathname === '/sitemap.xml') {
+    const urls = ['/', '/c/'].length; // (sitemap dinâmico abaixo)
+    const checks = await loadChecks();
+    const rows = ['<url><loc>' + SITE_ORIGIN + '/</loc><changefreq>daily</changefreq><priority>1.0</priority></url>'];
+    checks.slice(0, 500).forEach(c => rows.push('<url><loc>' + SITE_ORIGIN + '/c/' + c.id + '</loc><lastmod>' + (c.verified_at||'').slice(0,10) + '</lastmod></url>'));
+    res.writeHead(200, Object.assign({ 'Content-Type':'application/xml; charset=utf-8' }, SEC_HEADERS));
+    return res.end('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + rows.join('') + '</urlset>');
   }
 
   // ---- Frontend SPA ----
   if (url.pathname === '/' || url.pathname === '/index.html') return sendHTML(res, 'index.html');
-  if (url.pathname === '/app.js') { res.writeHead(200,{'Content-Type':'application/javascript'}); return fs.createReadStream(path.join(PUBLIC_DIR,'app.js')).pipe(res); }
-  if (url.pathname === '/styles.css') { res.writeHead(200,{'Content-Type':'text/css'}); return fs.createReadStream(path.join(PUBLIC_DIR,'styles.css')).pipe(res); }
+  if (url.pathname === '/app.js') { res.writeHead(200, Object.assign({'Content-Type':'application/javascript; charset=utf-8', 'Cache-Control':'max-age=300'}, SEC_HEADERS)); return fs.createReadStream(path.join(PUBLIC_DIR,'app.js')).pipe(res); }
+  if (url.pathname === '/styles.css') { res.writeHead(200, Object.assign({'Content-Type':'text/css; charset=utf-8', 'Cache-Control':'max-age=300'}, SEC_HEADERS)); return fs.createReadStream(path.join(PUBLIC_DIR,'styles.css')).pipe(res); }
   if (url.pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
 
   return json(res, 404, { error:'Rota não encontrada' });

@@ -43,6 +43,9 @@ data/checks.json   banco local (gerado automaticamente)
 - **Modo eleitoral** com contador de checagens e alertas de conteúdo falso.
 - **Histórico de verificações do usuário** (localStorage, no navegador).
 - **API pública** para imprensa (dados abertos em JSON, CC-BY-SA).
+- **Compartilhamento com impacto:** cada verificação tem uma **página pública** (`/c/:id`) com card de preview (Open Graph/Twitter) e **dados estruturados ClaimReview (schema.org)** — padrão global de fact-check (Google Fact Check Markup, usado por agências IFCN). Botões de compartilhar (WhatsApp/Telegram/X/copiar link) no resultado e na página pública.
+- **Eleições 2026:** **countdown** para o 1º turno (04/10) na home e no modo eleitoral; base prioriza boatos recorrentes de eleição.
+- **Segurança:** rate limiting por IP, bloqueio de brute-force no login, **anti-SSRF** no buscador de URL, cabeçalhos de segurança (CSP, X-Frame-Options, nosniff), limite de tamanho de corpo e escape completo contra XSS.
 - **Serviços públicos** por ente e por poder (federal, estadual, municipal) e **educação midiática**.
 - **Trilha de auditoria** (fonte, autor, data, status, métricas).
 - **Neutralidade radical**: verifica afirmações/dados, nunca pessoas, partidos ou ideologias.
@@ -54,9 +57,12 @@ data/checks.json   banco local (gerado automaticamente)
 | GET | `/api/pesquisa?q=` | Pesquisa real (Wikipedia + Câmara + fontes oficiais) |
 | GET | `/api/cnpj?cnpj=` | Consulta real de CNPJ (BrasilAPI/Receita) |
 | GET | `/api/politicos` | Perfis de agentes públicos com índice agregado |
-| GET | `/api/eleitoral` | Painel do modo eleitoral |
+| GET | `/api/eleitoral` | Painel do modo eleitoral (inclui countdown do 1º turno) |
 | GET | `/api/public` | API pública (filtros `categoria` / `classificacao`) |
 | GET | `/api/checks` | Lista verificações |
+| GET | `/api/checks/:id` | Leitura pública de 1 verificação |
+| GET | `/c/:id` | Página pública de 1 verificação (card OG + ClaimReview) |
+| GET | `/robots.txt` · `/sitemap.xml` | SEO/descoberta |
 | POST | `/api/checks` | Cria registro (requer auth) |
 | PATCH | `/api/checks/:id` | Atualiza (curadoria, requer auth) |
 | DELETE | `/api/checks/:id` | Remove (requer auth) |
